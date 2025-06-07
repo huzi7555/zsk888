@@ -49,77 +49,125 @@ function extractDocId(url: string): string {
   throw new Error('无法从链接中提取文档ID')
 }
 
+// 批量获取飞书图片并转换为base64的缓存
+const imageTokenCache = new Map<string, Promise<string | null>>()
+
 // 获取飞书图片并转换为base64
 async function getFeishuImageUrl(imageToken: string, token: string): Promise<string | null> {
+  // 如果已经在处理中，直接返回Promise
+  if (imageTokenCache.has(imageToken)) {
+    return imageTokenCache.get(imageToken)!
+  }
+
+  // 创建处理Promise并缓存
+  const processPromise = processImageToken(imageToken, token)
+  imageTokenCache.set(imageToken, processPromise)
+  
+  return processPromise
+}
+
+// 处理单个图片token
+async function processImageToken(imageToken: string, token: string): Promise<string | null> {
   try {
-    // 🔍 调试：打印关键信息
-    console.log('🔍 【调试步骤1】准备获取临时下载链接')
-    console.log('  - imageToken:', imageToken)
-    console.log('  - token长度:', token?.length || 0)
+    console.log('🔍 【处理图片】', imageToken)
     
-    const apiUrl = 'https://open.feishu.cn/open-apis/drive/v1/media/batch_get_tmp_download_url'
-    const requestData = { file_tokens: [imageToken] }
-    
-    console.log('  - API URL:', apiUrl)
-    console.log('  - 请求数据:', JSON.stringify(requestData, null, 2))
-    
-    // 步骤1: 使用正确的POST方法获取临时下载链接
-    const response = await fetch(apiUrl, {
-      method: 'POST',
+    // ✅ 按照建议：先验证单个token是否有效
+    const testUrl = `https://open.feishu.cn/open-apis/drive/v1/medias/${imageToken}/download`
+    const testResponse = await fetch(testUrl, {
+      method: 'HEAD', // 只获取头部信息
       headers: {
         'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
       },
-      body: JSON.stringify(requestData),
     })
     
-    console.log('  - 响应状态:', response.status, response.statusText)
+    console.log('🔍 【token验证】状态:', testResponse.status)
+    
+    if (testResponse.status === 404) {
+      console.error('❌ file_token已失效或无效:', imageToken)
+      return null
+    }
+    
+    if (testResponse.status === 403) {
+      console.error('❌ 权限不足，无法访问文件:', imageToken)
+      return null
+    }
+    
+    if (!testResponse.ok) {
+      console.error('❌ 文件访问测试失败:', testResponse.status, testResponse.statusText)
+      return null
+    }
+    
+    // ✅ token有效，使用batch接口获取临时下载链接
+    const batchUrl = `https://open.feishu.cn/open-apis/drive/v1/medias/batch_get_tmp_download_url?file_tokens=${imageToken}`
+    
+    const response = await fetch(batchUrl, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    })
     
     if (!response.ok) {
-      console.error('❌ API调用失败:', response.status, response.statusText)
-      const errorText = await response.text()
-      console.error('❌ 错误详情:', errorText)
+      console.error('❌ 批量接口调用失败:', response.status, response.statusText)
       return null
     }
     
     const result = await response.json()
-    console.log('✅ API响应:', JSON.stringify(result, null, 2))
     
-    // 检查飞书API的响应格式
     if (result.code !== 0) {
       console.error('❌ 飞书API错误:', result.msg || '未知错误')
       return null
     }
     
     if (!result.data?.tmp_download_urls?.length) {
-      console.error('❌ 没有获取到临时下载链接')
-      return null
+      console.error('❌ 批量接口返回空列表，回退到直接下载')
+      
+      // 如果batch接口返回空，直接使用原始下载链接
+      const directResponse = await fetch(testUrl, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      })
+      
+      if (!directResponse.ok) {
+        console.error('❌ 直接下载失败:', directResponse.status, directResponse.statusText)
+        return null
+      }
+      
+      // 获取图片二进制数据
+      const imageBuffer = await directResponse.arrayBuffer()
+      const contentType = directResponse.headers.get('content-type') || 'image/png'
+      
+      // 转换为base64编码
+      const base64String = Buffer.from(imageBuffer).toString('base64')
+      const dataUrl = `data:${contentType};base64,${base64String}`
+      
+      console.log('✅ 直接下载成功，大小:', Math.round(base64String.length / 1024), 'KB')
+      return dataUrl
     }
     
+    // 使用临时下载链接
     const tmpDownloadUrl = result.data.tmp_download_urls[0].tmp_download_url
-    console.log('✅ 获取到临时下载链接:', tmpDownloadUrl)
+    console.log('✅ 获取到临时下载链接')
     
-    // 步骤2: 使用临时链接下载图片二进制数据
     const downloadResponse = await fetch(tmpDownloadUrl)
     
     if (!downloadResponse.ok) {
-      console.error('❌ 图片下载失败:', downloadResponse.status, downloadResponse.statusText)
+      console.error('❌ 临时链接下载失败:', downloadResponse.status, downloadResponse.statusText)
       return null
     }
     
-    // 获取图片二进制数据
     const imageBuffer = await downloadResponse.arrayBuffer()
     const contentType = downloadResponse.headers.get('content-type') || 'image/png'
-    
-    // 转换为base64编码
     const base64String = Buffer.from(imageBuffer).toString('base64')
     const dataUrl = `data:${contentType};base64,${base64String}`
     
-    console.log('✅ 图片转换成功，大小:', Math.round(base64String.length / 1024), 'KB')
+    console.log('✅ 图片下载成功，大小:', Math.round(base64String.length / 1024), 'KB')
     return dataUrl
     
   } catch (error) {
-    console.error('❌ 获取图片过程中发生错误:', error)
+    console.error('❌ 处理图片时发生错误:', error)
     return null
   }
 }
