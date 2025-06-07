@@ -7,6 +7,87 @@ const FEISHU_CONFIG = {
   base_url: 'https://open.feishu.cn/open-apis'
 }
 
+// 定义飞书API返回的数据类型
+interface FeishuBlock {
+  block_type: number;
+  block_id?: string;
+  parent_id?: string;
+  text?: {
+    elements?: Array<{
+      text_run?: {
+        content?: string;
+        text_element_style?: {
+          bold?: boolean;
+          italic?: boolean;
+          underline?: boolean;
+          strike?: boolean;
+          link?: {
+            url?: string;
+          }
+        }
+      }
+    }>
+  };
+  heading?: {
+    elements?: Array<{
+      text_run?: {
+        content?: string;
+        text_element_style?: {
+          bold?: boolean;
+          italic?: boolean;
+          underline?: boolean;
+          strike?: boolean;
+          link?: {
+            url?: string;
+          }
+        }
+      }
+    }>
+  };
+  bulleted?: {
+    elements?: Array<{
+      text_run?: {
+        content?: string;
+        text_element_style?: {
+          bold?: boolean;
+          italic?: boolean;
+          underline?: boolean;
+          strike?: boolean;
+          link?: {
+            url?: string;
+          }
+        }
+      }
+    }>
+  };
+  ordered?: {
+    elements?: Array<{
+      text_run?: {
+        content?: string;
+        text_element_style?: {
+          bold?: boolean;
+          italic?: boolean;
+          underline?: boolean;
+          strike?: boolean;
+          link?: {
+            url?: string;
+          }
+        }
+      }
+    }>
+  };
+  image?: {
+    token: string;
+    width?: number;
+    height?: number;
+  };
+}
+
+interface TmpDownloadUrl {
+  file_token: string;
+  tmp_download_url: string;
+}
+
 // 获取飞书访问token
 async function getFeishuToken(): Promise<string> {
   try {
@@ -49,160 +130,129 @@ function extractDocId(url: string): string {
   throw new Error('无法从链接中提取文档ID')
 }
 
-// 批量获取飞书图片并转换为base64的缓存
-const imageTokenCache = new Map<string, Promise<string | null>>()
-
-// 获取飞书图片并转换为base64
-async function getFeishuImageUrl(imageToken: string, token: string): Promise<string | null> {
-  // 如果已经在处理中，直接返回Promise
-  if (imageTokenCache.has(imageToken)) {
-    return imageTokenCache.get(imageToken)!
-  }
-
-  // 创建处理Promise并缓存
-  const processPromise = processImageToken(imageToken, token)
-  imageTokenCache.set(imageToken, processPromise)
+// 批量获取临时下载URL
+async function batchGetTmpUrls(tokens: string[], accessToken: string): Promise<TmpDownloadUrl[]> {
+  const res = await fetch(
+    'https://open.feishu.cn/open-apis/drive/v1/medias/batch_get_tmp_download_url',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ file_tokens: tokens }),
+    },
+  )
   
-  return processPromise
+  const json = await res.json()
+  console.log(`批量获取临时URL响应: ${JSON.stringify(json)}`)
+  
+  if (json.code !== 0) {
+    throw new Error(`飞书错误 ${json.code}: ${json.msg || '未知错误'}`)
+  }
+  
+  return json.data.tmp_download_urls
 }
 
-// 处理单个图片token
-async function processImageToken(imageToken: string, token: string): Promise<string | null> {
+// 将图片URL转换为base64
+async function downloadImageAsBase64(url: string): Promise<string | null> {
   try {
-    console.log('🔍 【处理图片】', imageToken)
-    
-    // ✅ 按照建议：先验证单个token是否有效
-    const testUrl = `https://open.feishu.cn/open-apis/drive/v1/medias/${imageToken}/download`
-    const testResponse = await fetch(testUrl, {
-      method: 'HEAD', // 只获取头部信息
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    })
-    
-    console.log('🔍 【token验证】状态:', testResponse.status)
-    
-    if (testResponse.status === 404) {
-      console.error('❌ file_token已失效或无效:', imageToken)
-      return null
-    }
-    
-    if (testResponse.status === 403) {
-      console.error('❌ 权限不足，无法访问文件:', imageToken)
-      return null
-    }
-    
-    if (!testResponse.ok) {
-      console.error('❌ 文件访问测试失败:', testResponse.status, testResponse.statusText)
-      return null
-    }
-    
-    // ✅ token有效，使用batch接口获取临时下载链接
-    const batchUrl = `https://open.feishu.cn/open-apis/drive/v1/medias/batch_get_tmp_download_url?file_tokens=${imageToken}`
-    
-    const response = await fetch(batchUrl, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    })
+    const response = await fetch(url) // 注意：下载时不要再添加Authorization头
     
     if (!response.ok) {
-      console.error('❌ 批量接口调用失败:', response.status, response.statusText)
+      console.error('下载图片失败:', response.status, response.statusText)
       return null
     }
     
-    const result = await response.json()
-    
-    if (result.code !== 0) {
-      console.error('❌ 飞书API错误:', result.msg || '未知错误')
-      return null
-    }
-    
-    if (!result.data?.tmp_download_urls?.length) {
-      console.error('❌ 批量接口返回空列表，回退到直接下载')
-      
-      // 如果batch接口返回空，直接使用原始下载链接
-      const directResponse = await fetch(testUrl, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      })
-      
-      if (!directResponse.ok) {
-        console.error('❌ 直接下载失败:', directResponse.status, directResponse.statusText)
-        return null
-      }
-      
-      // 获取图片二进制数据
-      const imageBuffer = await directResponse.arrayBuffer()
-      const contentType = directResponse.headers.get('content-type') || 'image/png'
-      
-      // 转换为base64编码
-      const base64String = Buffer.from(imageBuffer).toString('base64')
-      const dataUrl = `data:${contentType};base64,${base64String}`
-      
-      console.log('✅ 直接下载成功，大小:', Math.round(base64String.length / 1024), 'KB')
-      return dataUrl
-    }
-    
-    // 使用临时下载链接
-    const tmpDownloadUrl = result.data.tmp_download_urls[0].tmp_download_url
-    console.log('✅ 获取到临时下载链接')
-    
-    const downloadResponse = await fetch(tmpDownloadUrl)
-    
-    if (!downloadResponse.ok) {
-      console.error('❌ 临时链接下载失败:', downloadResponse.status, downloadResponse.statusText)
-      return null
-    }
-    
-    const imageBuffer = await downloadResponse.arrayBuffer()
-    const contentType = downloadResponse.headers.get('content-type') || 'image/png'
-    const base64String = Buffer.from(imageBuffer).toString('base64')
-    const dataUrl = `data:${contentType};base64,${base64String}`
-    
-    console.log('✅ 图片下载成功，大小:', Math.round(base64String.length / 1024), 'KB')
-    return dataUrl
-    
+    const buffer = await response.arrayBuffer()
+    const contentType = response.headers.get('content-type') || 'image/png'
+    const base64 = Buffer.from(buffer).toString('base64')
+    return `data:${contentType};base64,${base64}`
   } catch (error) {
-    console.error('❌ 处理图片时发生错误:', error)
+    console.error('下载图片时出错:', error)
     return null
   }
 }
 
 // 自动检测文本中的URL并转换为链接
 function autoLinkUrls(text: string): string {
-  const urlRegex = /(https?:\/\/[^\s<>"{}|\\^`[\]]+)/g;
-  return text.replace(urlRegex, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>');
+  const urlRegex = /(https?:\/\/[^\s<>"{}|\\^`[\]]+)/g
+  return text.replace(urlRegex, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
 }
 
-// 获取飞书文件信息和处理方式
-async function getFeishuFileInfo(fileToken: string, token: string): Promise<{ type: 'download' | 'embed', url: string } | null> {
-  try {
-    // 对于文件，我们提供下载链接而不是内嵌
-    // 因为大部分文件（特别是视频）太大不适合base64编码
-    const downloadUrl = `${FEISHU_CONFIG.base_url}/drive/v1/media/${fileToken}/download`
+// 处理文本块
+function processTextBlock(block: FeishuBlock): string {
+  let html = ''
+  for (const element of block.text?.elements || []) {
+    let content = element.text_run?.content || ''
     
-    // 检查文件是否可访问
-    const testResponse = await fetch(downloadUrl, {
-      method: 'HEAD', // 只获取头部信息，不下载内容
-      headers: {
-        'Authorization': `Bearer ${token}`
-      }
-    })
-    
-    if (testResponse.ok) {
-      return { type: 'download', url: downloadUrl }
-    } else {
-      console.error('文件不可访问:', testResponse.status, testResponse.statusText)
-      return null
+    // 处理格式
+    if (element.text_run?.text_element_style) {
+      const style = element.text_run.text_element_style
+      if (style.bold) content = `<strong>${content}</strong>`
+      if (style.italic) content = `<em>${content}</em>`
+      if (style.underline) content = `<u>${content}</u>`
+      if (style.strike) content = `<del>${content}</del>`
+      if (style.link?.url) content = `<a href="${style.link.url}" target="_blank">${content}</a>`
     }
-  } catch (error) {
-    console.error('检查文件访问失败:', error)
-    return null
+    
+    html += content
   }
+  
+  // 自动识别URL
+  html = autoLinkUrls(html)
+  
+  return `<p>${html}</p>\n`
+}
+
+// 处理标题块
+function processHeadingBlock(block: FeishuBlock): string {
+  const level = parseInt(String(block.block_type).replace('heading', ''), 10) || 1
+  const headingTag = `h${Math.min(level, 6)}`
+  
+  let html = ''
+  for (const element of block.heading?.elements || []) {
+    let content = element.text_run?.content || ''
+    
+    // 处理格式
+    if (element.text_run?.text_element_style) {
+      const style = element.text_run.text_element_style
+      if (style.bold) content = `<strong>${content}</strong>`
+      if (style.italic) content = `<em>${content}</em>`
+      if (style.underline) content = `<u>${content}</u>`
+      if (style.strike) content = `<del>${content}</del>`
+      if (style.link?.url) content = `<a href="${style.link.url}" target="_blank">${content}</a>`
+    }
+    
+    html += content
+  }
+  
+  return `<${headingTag}>${html}</${headingTag}>\n`
+}
+
+// 处理列表块
+function processListBlock(block: FeishuBlock, isBulleted: boolean): string {
+  const listType = isBulleted ? 'ul' : 'ol'
+  let html = `<${listType}>`
+  
+  for (const element of block[isBulleted ? 'bulleted' : 'ordered']?.elements || []) {
+    let content = element.text_run?.content || ''
+    
+    // 处理格式
+    if (element.text_run?.text_element_style) {
+      const style = element.text_run.text_element_style
+      if (style.bold) content = `<strong>${content}</strong>`
+      if (style.italic) content = `<em>${content}</em>`
+      if (style.underline) content = `<u>${content}</u>`
+      if (style.strike) content = `<del>${content}</del>`
+      if (style.link?.url) content = `<a href="${style.link.url}" target="_blank">${content}</a>`
+    }
+    
+    html += `<li>${content}</li>`
+  }
+  
+  html += `</${listType}>\n`
+  return html
 }
 
 // 核心：解析飞书文档内容
@@ -222,7 +272,7 @@ async function parseFeishuDocContent(docId: string, token: string): Promise<stri
       throw new Error(`获取文档信息失败: ${docInfo.msg}`)
     }
     
-    // 获取文档内容块 - 尝试递归获取所有内容
+    // 获取文档内容块
     const contentResponse = await fetch(`${FEISHU_CONFIG.base_url}/docx/v1/documents/${docId}/blocks?page_size=500`, {
       headers: {
         'Authorization': `Bearer ${token}`
@@ -234,10 +284,52 @@ async function parseFeishuDocContent(docId: string, token: string): Promise<stri
       throw new Error(`获取文档内容失败: ${contentData.msg}`)
     }
     
-    console.log('📄 内容块数量:', contentData.data?.items?.length || 0)
+    const allBlocks = contentData.data?.items || []
+    console.log('📄 内容块数量:', allBlocks.length)
     
+    // 打印所有block_type，帮助调试
+    console.log('🔍 所有区块类型:', allBlocks.map((b: FeishuBlock) => b.block_type))
+    
+    // 1. 提取所有图片token
+    const imageTokens = allBlocks
+      .filter((block: FeishuBlock) => block.block_type === 17) // 17 是图片类型
+      .map((block: FeishuBlock) => block.image?.token)
+      .filter(Boolean)
+    
+    console.log(`🖼️ 发现 ${imageTokens.length} 张图片`)
+    
+    // 2. 批量获取所有图片的临时下载链接
+    let tmpUrlMap = new Map<string, string>()
+    
+    if (imageTokens.length > 0) {
+      // 按每50个token一组进行分批处理
+      const BATCH_SIZE = 50
+      const chunks: string[][] = []
+      
+      for (let i = 0; i < imageTokens.length; i += BATCH_SIZE) {
+        chunks.push(imageTokens.slice(i, i + BATCH_SIZE))
+      }
+      
+      // 并行处理所有批次
+      try {
+        const allResults = await Promise.all(
+          chunks.map(chunk => batchGetTmpUrls(chunk, token))
+        )
+        
+        // 将所有结果合并到一个Map中
+        allResults.flat().forEach(item => {
+          tmpUrlMap.set(item.file_token, item.tmp_download_url)
+        })
+        
+        console.log(`✅ 成功获取 ${tmpUrlMap.size} 个临时下载链接`)
+      } catch (error) {
+        console.error('批量获取临时链接失败:', error)
+      }
+    }
+    
+    // 3. 处理文档内容
     const title = docInfo.data?.document?.title || '未命名文档'
-    let content = `# ${title}\n\n`
+    let content = `<h1>${title}</h1>\n`
     
     // 统计信息
     let stats = {
@@ -251,310 +343,131 @@ async function parseFeishuDocContent(docId: string, token: string): Promise<stri
       unknown: 0
     }
     
-    // 解析内容块
-    for (const block of contentData.data?.items || []) {
+    // 处理所有块
+    for (const block of allBlocks) {
       switch (block.block_type) {
-        case 1: // 页面块/段落容器
-          // 这通常是一个容器，不需要特殊处理
-          break
-          
         case 2: // 文本
-          if (block.text) {
-            const textContent = block.text.elements?.map((el: any) => {
-              if (el.text_run) {
-                return el.text_run.content || ''
-              } else if (el.link) {
-                // 处理链接
-                const linkText = el.link.text || el.link.url || ''
-                const linkUrl = el.link.url || ''
-                return `<a href="${linkUrl}" target="_blank" rel="noopener noreferrer">${linkText}</a>`
-              }
-              return ''
-            }).join('') || ''
-            if (textContent.trim()) {
-              // 自动检测和转换URL为链接
-              const linkedContent = autoLinkUrls(textContent)
-              content += `<p>${linkedContent}</p>\n`
-              stats.textBlocks++
-            }
-          }
+          content += processTextBlock(block)
+          stats.textBlocks++
           break
           
         case 3: // 标题1
-          if (block.heading1) {
-            const headingText = block.heading1.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (headingText.trim()) {
-              content += `<h1>${headingText}</h1>\n`
-              stats.headings++
-            }
-          }
-          break
-          
         case 4: // 标题2
-          if (block.heading2) {
-            const headingText = block.heading2.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (headingText.trim()) {
-              content += `<h2>${headingText}</h2>\n`
-              stats.headings++
-            }
-          }
-          break
-          
         case 5: // 标题3
-          if (block.heading3) {
-            const headingText = block.heading3.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (headingText.trim()) {
-              content += `<h3>${headingText}</h3>\n`
-              stats.headings++
-            }
-          }
+        case 6: // 标题4
+        case 7: // 标题5
+        case 8: // 标题6
+        case 9: // 标题7
+        case 10: // 标题8
+        case 11: // 标题9
+          const level = block.block_type - 2
+          content += processHeadingBlock(block)
+          stats.headings++
           break
           
-        case 12: // 项目符号列表
-          if (block.bullet) {
-            const listText = block.bullet.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (listText.trim()) {
-              content += `<li>${listText}</li>\n`
-              stats.lists++
-            }
-          }
+        case 12: // 无序列表
+          content += processListBlock(block, true)
+          stats.lists++
           break
           
         case 13: // 有序列表
-          if (block.ordered) {
-            const listText = block.ordered.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (listText.trim()) {
-              content += `<li>${listText}</li>\n`
-              stats.lists++
-            }
-          }
+          content += processListBlock(block, false)
+          stats.lists++
           break
           
-        case 27: // 图片
-          if (block.image?.token) {
-            stats.images++
-            console.log(`🔍 【发现图片块】第${stats.images}张图片`)
-            console.log('  - image.token:', block.image.token)
-            console.log('  - 完整image对象:', JSON.stringify(block.image, null, 2))
-            
-            try {
-              // 获取图片下载链接
-              const imageUrl = await getFeishuImageUrl(block.image.token, token)
-              if (imageUrl) {
-                content += `<p><img src="${imageUrl}" alt="飞书文档图片" style="max-width: 100%; height: auto;" /></p>\n`
-                console.log('  ✅ 图片处理成功')
-              } else {
-                content += `<p>🖼️ [图片: ${block.image.token}] <em>需要配置图片访问权限</em></p>\n`
-                console.log('  ❌ 图片处理失败：返回null')
-              }
-            } catch (error) {
-              console.error('获取图片失败:', error)
-              content += `<p>🖼️ [图片: ${block.image.token}] <em>权限不足或网络错误</em></p>\n`
-            }
+        case 17: // 图片
+          stats.images++
+          
+          const downloadUrl = tmpUrlMap.get(block.image?.token || '')
+          if (!downloadUrl) {
+            content += `<p>🖼️ [图片缺失: ${block.image?.token}]</p>\n`
+            break
           }
+          
+          content += `<p><img src="${downloadUrl}" 
+                         alt="飞书文档图片" 
+                         style="max-width:100%;height:auto;"/></p>\n`
           break
           
-        case 28: // 视频
-          if (block.file?.token) {
-            stats.videos++
-            try {
-              // 获取视频信息
-              const fileInfo = await getFeishuFileInfo(block.file.token, token)
-              if (fileInfo) {
-                const fileName = block.file.name || '视频文件'
-                content += `<p>🎥 <a href="${fileInfo.url}" target="_blank" rel="noopener noreferrer">${fileName}</a> (点击下载视频)</p>\n`
-              } else {
-                content += `<p>[视频无法加载: ${block.file.token}]</p>\n`
-              }
-            } catch (error) {
-              console.error('获取视频失败:', error)
-              content += `<p>[视频加载失败: ${block.file.token}]</p>\n`
-            }
-          }
+        case 18: // 视频
+          content += `<p>📹 [视频内容]</p>\n`
+          stats.videos++
           break
           
-        case 29: // 文件
-          if (block.file?.token) {
-            stats.files++
-            try {
-              // 获取文件信息
-              const fileInfo = await getFeishuFileInfo(block.file.token, token)
-              if (fileInfo) {
-                const fileName = block.file.name || '未知文件'
-                content += `<p>📎 <a href="${fileInfo.url}" target="_blank" rel="noopener noreferrer">${fileName}</a></p>\n`
-              } else {
-                content += `<p>[文件无法加载: ${block.file.token}]</p>\n`
-              }
-            } catch (error) {
-              console.error('获取文件失败:', error)
-              content += `<p>[文件加载失败: ${block.file.token}]</p>\n`
-            }
-          }
+        case 15: // 文件
+          content += `<p>📎 [文件附件]</p>\n`
+          stats.files++
           break
           
-        case 15: // 表格
+        case 27: // 表格
+          content += `<p>📊 [表格内容]</p>\n`
           stats.tables++
-          content += '<p>[表格内容]</p>\n'
-          break
-          
-        case 14: // 分割线
-          content += `<hr/>\n`
-          break
-          
-        case 19: // 引用块
-          if (block.quote) {
-            const quoteContent = block.quote.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (quoteContent.trim()) {
-              content += `<blockquote>${quoteContent}</blockquote>\n`
-              stats.textBlocks++
-            }
-          }
-          break
-          
-        case 22: // 代码块
-          if (block.code) {
-            const codeContent = block.code.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (codeContent.trim()) {
-              content += `<pre><code>${codeContent}</code></pre>\n`
-              stats.textBlocks++
-            }
-          }
-          break
-          
-        case 23: // 链接块
-          if (block.link) {
-            const linkText = block.link.text || block.link.url || '链接'
-            const linkUrl = block.link.url || '#'
-            content += `<p><a href="${linkUrl}" target="_blank" rel="noopener noreferrer">${linkText}</a></p>\n`
-            stats.textBlocks++
-          }
-          break
-          
-        case 24: // 嵌入块
-          if (block.embed) {
-            const embedUrl = block.embed.url || ''
-            const embedTitle = block.embed.title || '嵌入内容'
-            content += `<p>🔗 <a href="${embedUrl}" target="_blank" rel="noopener noreferrer">${embedTitle}</a></p>\n`
-            stats.textBlocks++
-          }
-          break
-          
-        case 25: // 网格布局
-          content += `<p>[网格布局内容]</p>\n`
-          break
-          
-        case 30: // 高亮块
-          if (block.callout) {
-            const calloutContent = block.callout.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (calloutContent.trim()) {
-              content += `<div style="background-color: #f0f0f0; padding: 10px; border-radius: 5px; margin: 10px 0;">${calloutContent}</div>\n`
-              stats.textBlocks++
-            }
-          }
-          break
-          
-        case 33: // 其他内容块（可能是代码块或特殊格式）
-          if (block.code) {
-            const codeContent = block.code.elements?.map((el: any) => el.text_run?.content || '').join('') || ''
-            if (codeContent.trim()) {
-              content += `<pre><code>${codeContent}</code></pre>\n`
-              stats.textBlocks++
-            }
-          } else {
-            // 尝试提取其他可能的文本内容
-            stats.unknown++
-          }
-          break
-          
-        case 34: // 多媒体块
-          if (block.media) {
-            content += `<p>[多媒体内容]</p>\n`
-            stats.unknown++
-          }
           break
           
         default:
-          // 未识别的块类型
+          console.log(`未知区块类型: ${block.block_type}`, block)
+          content += `<p>[未知内容块]</p>\n`
           stats.unknown++
-          console.log(`未处理的块类型: ${block.block_type}`)
-          break
       }
     }
     
-    // 输出统计信息
     console.log('📊 解析统计:', stats)
     
-    // 添加统计到内容末尾
-    const statsText = []
-    if (stats.textBlocks > 0) statsText.push(`${stats.textBlocks} 段文本`)
-    if (stats.headings > 0) statsText.push(`${stats.headings} 个标题`)
-    if (stats.lists > 0) statsText.push(`${stats.lists} 个列表项`)
-    if (stats.images > 0) statsText.push(`${stats.images} 张图片`)
-    if (stats.videos > 0) statsText.push(`${stats.videos} 个视频`)
-    if (stats.files > 0) statsText.push(`${stats.files} 个文件`)
-    if (stats.tables > 0) statsText.push(`${stats.tables} 个表格`)
-    
-    if (statsText.length > 0) {
-      content += `\n\n---\n\n📊 **解析统计**: ${statsText.join('、')}\n`
-    }
-    
-    // 如果有图片无法加载，添加权限配置说明
-    if (stats.images > 0) {
-      content += `\n\n> ℹ️ **提示**: 如果图片无法显示，请在飞书开放平台为应用添加以下权限：\n`
-      content += `> - \`im:file\` - 获取单个用户文件\n`
-      content += `> - \`drive:file\` - 访问云文档文件\n`
-      content += `> - \`drive:file:readonly\` - 查看云空间中所有文件\n`
-    }
-    
     return content
-    
   } catch (error) {
-    console.error('解析飞书文档失败:', error)
+    console.error('解析文档内容时出错:', error)
     throw error
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const { url } = await request.json()
-    
-    if (!url) {
-      return NextResponse.json({ error: '缺少文档链接' }, { status: 400 })
-    }
-    
-    // 调试日志
+    // 检查环境变量
     console.log('🔍 服务器端调试信息:')
-    console.log('FEISHU_APP_ID:', process.env.FEISHU_APP_ID)
-    console.log('FEISHU_APP_SECRET:', process.env.FEISHU_APP_SECRET ? '已配置' : '未配置')
+    console.log('FEISHU_APP_ID:', FEISHU_CONFIG.app_id)
+    console.log('FEISHU_APP_SECRET:', FEISHU_CONFIG.app_secret ? '已配置' : '未配置')
     
-    // 检查是否配置了飞书API
     if (!FEISHU_CONFIG.app_id || !FEISHU_CONFIG.app_secret) {
-      console.log('❌ 环境变量未配置，返回模拟数据')
-      return NextResponse.json({
-        content: `# 飞书文档内容 (模拟)\n\n> 来源：${url}\n\n⚠️ 需要配置飞书API密钥才能获取真实内容\n\n这里是模拟的文档内容...`,
-        isSimulated: true
-      })
+      return NextResponse.json({ 
+        error: '服务器环境变量未配置', 
+        message: '请先配置飞书API密钥' 
+      }, { status: 500 })
     }
     
     console.log('✅ 环境变量已配置，开始解析...')
-    const docId = extractDocId(url)
-    console.log('📄 提取的文档ID:', docId)
     
+    // 获取飞书链接
+    const { url } = await request.json()
+    
+    if (!url) {
+      return NextResponse.json({ 
+        error: '参数错误', 
+        message: '请提供有效的飞书文档链接' 
+      }, { status: 400 })
+    }
+    
+    // 提取文档ID
+    const documentId = extractDocId(url)
+    console.log('📄 提取的文档ID:', documentId)
+    
+    // 获取访问令牌
     const token = await getFeishuToken()
     console.log('🔑 获取Token成功')
     
-    const content = await parseFeishuDocContent(docId, token)
+    // 解析文档内容
+    const htmlContent = await parseFeishuDocContent(documentId, token)
     
-    return NextResponse.json({
-      content: content + `\n\n> 来源：${url}\n\n✅ 已成功解析飞书文档内容`,
-      isSimulated: false
+    return NextResponse.json({ 
+      title: '飞书文档解析结果',
+      html: htmlContent 
     })
     
-  } catch (error) {
-    console.error('❌ API路由错误:', error)
-    return NextResponse.json(
-      { error: `解析失败: ${error instanceof Error ? error.message : '未知错误'}` },
-      { status: 500 }
-    )
+  } catch (error: any) {
+    console.error('解析飞书文档失败:', error)
+    
+    return NextResponse.json({ 
+      error: '解析失败', 
+      message: error.message || '未知错误'
+    }, { status: 500 })
   }
 } 
