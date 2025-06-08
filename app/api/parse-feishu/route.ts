@@ -780,31 +780,110 @@ async function createExportTask(
   fileToken: string,
   tenantToken: string,
 ): Promise<string> {
-  const res = await fetch('https://open.feishu.cn/open-apis/drive/v1/export_tasks', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${tenantToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+  try {
+    console.log(`开始创建文档导出任务，文档token: ${fileToken}`);
+    
+    console.log('file_token =', fileToken); // 调试日志，确认值不为空
+    
+    if (!fileToken) throw new Error('file_token is empty');
+    
+    const url = 'https://open.feishu.cn/open-apis/drive/v1/export_task/create';
+    
+    // 根据最新API要求，使用file_token参数
+    const requestBody = {
       file_token: fileToken,
-      file_extension: 'docx',           // ← 官方字段叫 file_extension
-    }),
-  });
-
-  const j = await res.json();
-  if (j.code !== 0) {
-    throw new Error(`创建导出任务失败: ${j.msg}`);
+      type: 'pdf'  // 如需 Word 可改 'docx'
+    };
+    
+    console.log("请求URL:", url);
+    console.log("请求参数:", JSON.stringify(requestBody, null, 2));
+    console.log("Authorization:", `Bearer ${tenantToken.substring(0, 10)}...`);
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tenantToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(requestBody),
+    });
+    
+    // 获取完整响应内容便于调试
+    const responseText = await response.text();
+    console.log("API响应状态:", response.status);
+    console.log("API响应头:", JSON.stringify(Object.fromEntries(response.headers.entries()), null, 2));
+    console.log("API响应内容:", responseText);
+    
+    let responseData;
+    try {
+      responseData = JSON.parse(responseText);
+    } catch (error) {
+      console.error("解析响应JSON失败:", error);
+      throw new Error(`无法解析API响应: ${responseText.substring(0, 100)}...`);
+    }
+    
+    // 检查API响应是否成功
+    if (responseData.code !== 0) {
+      console.error("创建导出任务失败详情:", responseData);
+      
+      // 识别权限错误并提供清晰提示
+      if (responseData.code === 11304 || 
+          (responseData.msg && (
+            responseData.msg.includes('permission') || 
+            responseData.msg.includes('Access denied') ||
+            responseData.msg.includes('scope') ||
+            responseData.msg.includes('no permission')
+          ))) {
+        throw new Error(`飞书API权限不足: ${responseData.msg || '权限错误'}。
+请确保您的应用已获得以下权限之一:
+- drive:export:readonly
+- docs:document:export
+并确认应用已正确安装到企业中，且已获得文档访问权限。
+请在飞书开放平台-应用管理-权限管理中添加这些权限，然后重新发布应用版本并审批通过。`);
+      }
+      
+      // 字段验证失败
+      if (responseData.code === 99992402 || responseData.msg?.includes('field validation')) {
+        console.error("字段验证失败详情:", responseData.error?.field_violations);
+        
+        // 尝试解析具体的字段错误
+        let fieldErrors = "未知字段错误";
+        if (responseData.error?.field_violations) {
+          fieldErrors = JSON.stringify(responseData.error.field_violations);
+        }
+        
+        throw new Error(`API参数错误: 字段验证失败。
+具体错误: ${fieldErrors}
+请确保使用正确的API参数格式。飞书API可能已更新，请参考最新的飞书开放平台文档。
+常见问题:
+1. token参数格式不正确
+2. type参数值不在允许范围内
+3. 缺少必要的权限`);
+      }
+      
+      throw new Error(`创建导出任务失败: ${responseData.msg || '未知错误'}`);
+    }
+    
+    // 成功情况下返回task_id
+    const taskId = responseData.data?.task_id;
+    if (!taskId) {
+      throw new Error("API返回成功但没有返回task_id");
+    }
+    
+    console.log(`导出任务创建成功, taskId: ${taskId}`);
+    return taskId;
+  } catch (error) {
+    console.error("创建导出任务过程中发生异常:", error);
+    throw error;
   }
-  return j.data.ticket;                // 返回任务 ticket
 }
 
 // 轮询导出任务状态并获取下载地址
 async function pollExportTask(
-  ticket: string,
+  taskId: string,
   tenantToken: string,
 ): Promise<string /*downloadUrl*/> {
-  const url = `https://open.feishu.cn/open-apis/drive/v1/export_tasks/${ticket}`;
+  const url = `https://open.feishu.cn/open-apis/drive/v1/export_task/get?task_id=${taskId}`;
   for (let i = 0; i < 20; i++) {          // 最多等 20×500ms = 10s
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${tenantToken}` },
@@ -878,19 +957,44 @@ async function parseDocsContent(
     
     // 获取tenant token (Bearer格式)
     const tenantToken = token.startsWith('Bearer ') ? token.substring(7) : token;
+    console.log("文档ID:", docId, "Token长度:", tenantToken.length);
     
-    // 创建导出任务
-    const ticket = await createExportTask(docId, tenantToken);
-    console.log("🎫 创建导出任务成功, ticket:", ticket);
-    
-    // 轮询获取下载链接
-    const downloadUrl = await pollExportTask(ticket, tenantToken);
-    console.log("📥 获取下载链接成功:", downloadUrl);
-    
-    // 下载并转换为Markdown
-    return await downloadDocxAndToMd(downloadUrl);
-  } catch (error) {
-    console.error("解析旧版docs文档失败:", error);
+    try {
+      // 创建导出任务
+      console.log("⏳ 开始创建导出任务...");
+      const taskId = await createExportTask(docId, tenantToken);
+      console.log("🎫 创建导出任务成功, taskId:", taskId);
+      
+      // 轮询获取下载链接
+      console.log("⏳ 开始轮询导出任务状态...");
+      const downloadUrl = await pollExportTask(taskId, tenantToken);
+      console.log("📥 获取下载链接成功:", downloadUrl);
+      
+      // 下载并转换为Markdown
+      console.log("⏳ 开始下载文档并转换为Markdown...");
+      const markdown = await downloadDocxAndToMd(downloadUrl);
+      console.log("✅ 文档下载并转换完成, 内容长度:", markdown.length);
+      
+      return markdown;
+    } catch (error: any) {
+      console.error("解析旧版docs文档失败:", error);
+      
+      // 针对特定错误进行友好处理
+      if (error.message && (
+        error.message.includes("field validation failed") ||
+        error.message.includes("param error")
+      )) {
+        throw new Error("API参数错误: 请联系管理员检查API参数格式");
+      }
+      
+      if (error.message && error.message.includes("no permission")) {
+        throw new Error("飞书API权限不足: 请确保应用已获得docs:document:export或drive:export:readonly权限，并正确安装到企业中");
+      }
+      
+      throw error;
+    }
+  } catch (error: any) {
+    console.error("解析docs文档内容时出错:", error);
     throw error;
   }
 }
@@ -901,64 +1005,109 @@ export async function POST(req: NextRequest) {
     console.log("🔍 服务器端调试信息:");
     
     // 检查环境变量
-    console.log("FEISHU_APP_ID:", FEISHU_CONFIG.app_id);
-    if (FEISHU_CONFIG.app_secret) {
-      console.log("FEISHU_APP_SECRET:", "已配置");
-    } else {
-      console.log("FEISHU_APP_SECRET:", "未配置");
-      return NextResponse.json(
-        { error: "缺少飞书API凭证" },
-        { status: 500 }
-      );
+    const appId = process.env.FEISHU_APP_ID;
+    const appSecret = process.env.FEISHU_APP_SECRET;
+    
+    if (!appId) {
+      console.error("❌ 缺少FEISHU_APP_ID环境变量");
+      return Response.json({ error: "配置错误", details: "缺少飞书应用ID配置" }, { status: 500 });
     }
     
+    console.log("FEISHU_APP_ID:", appId);
+    
+    if (!appSecret) {
+      console.error("❌ 缺少FEISHU_APP_SECRET环境变量");
+      return Response.json({ error: "配置错误", details: "缺少飞书应用密钥配置" }, { status: 500 });
+    }
+    
+    console.log("FEISHU_APP_SECRET: 已配置");
     console.log("✅ 环境变量已配置，开始解析...");
     
-    // 获取请求数据
-    const data = await req.json();
-    const url = data.url;
+    // 解析请求体
+    const { url } = await req.json();
     
     if (!url) {
-      return NextResponse.json(
-        { error: "缺少链接URL" },
-        { status: 400 }
-      );
+      console.error("❌ 缺少URL参数");
+      return Response.json({ error: "参数错误", details: "缺少URL参数" }, { status: 400 });
     }
     
     console.log("🔗 收到请求链接:", url);
     
-    // 解析飞书文档链接
-    const parseResult = parseFeishuLink(url);
+    // 解析飞书链接
+    const docPath = new URL(url).pathname;
+    console.log("📄 提取的文档路径:", docPath);
     
-    console.log("🔄 解析链接结果:", parseResult);
-    
-    if (!parseResult) {
-      return NextResponse.json(
-        { error: "无效的飞书文档链接" },
-        { status: 400 }
-      );
+    const linkInfo = parseFeishuLink(url);
+    if (!linkInfo) {
+      console.error("❌ 无效的飞书链接格式");
+      return Response.json({ error: "链接错误", details: "不支持的飞书文档链接格式" }, { status: 400 });
     }
     
-    const { kind, token: docId } = parseResult;
-    console.log("🔑 文档Token:", docId);
+    const { kind, token } = linkInfo;
+    console.log("✅ 文档类型:", kind, "ID:", token);
+    console.log("🔄 解析链接结果:", linkInfo);
     
     // 获取访问令牌
+    console.log("🔑 文档Token:", token);
     const accessToken = await getFeishuAccessToken();
+    console.log("🔑 Token响应:", accessToken);
     
-    // 解析文档内容
-    const content = await parseFeishuDocContent(docId, accessToken, kind);
-    
-    // 统计文档内容
-    const stats = countContentElements(content);
-    console.log("📊 解析统计:", stats);
-    
-    return NextResponse.json({ content, stats });
+    // 根据文档类型解析内容
+    let content;
+    try {
+      console.log("🔍 开始解析" + kind + "类型文档:", token);
+      content = await parseFeishuDocContent(token, accessToken, kind);
+      
+      // 计算内容元素
+      const stats = countContentElements(content);
+      
+      // 转换为HTML（如果需要）
+      const html = convertMarkdownToHtml(content);
+      
+      return Response.json({
+        success: true,
+        content,
+        html,
+        stats,
+        metadata: {
+          docType: kind,
+          docId: token,
+          timestamp: new Date().toISOString(),
+        },
+      });
+    } catch (error: any) {
+      console.error("解析过程中发生错误:", error);
+      
+      // 提供更友好的错误消息
+      let errorMessage = "解析飞书文档时发生错误，请稍后重试或联系管理员。";
+      let errorDetails = error.message || "未知错误";
+      let statusCode = 500;
+      
+      // 处理常见错误类型
+      if (errorDetails.includes('飞书API权限不足')) {
+        errorMessage = "飞书API权限不足，无法导出文档";
+        errorDetails = `应用缺少必要的API权限。${errorDetails}`;
+        statusCode = 403;
+      } else if (errorDetails.includes('API参数错误')) {
+        errorMessage = "API参数错误";
+        statusCode = 400;
+      } else if (errorDetails.includes('导出任务失败')) {
+        errorMessage = "文档导出失败";
+      }
+      
+      return Response.json({ 
+        error: errorMessage, 
+        details: errorDetails,
+        originalError: error.message 
+      }, { status: statusCode });
+    }
   } catch (error: any) {
-    console.error("解析失败:", error);
-    return NextResponse.json(
-      { error: error.message || "解析过程中发生错误" },
-      { status: 500 }
-    );
+    console.error("处理请求时发生错误:", error);
+    return Response.json({ 
+      error: "服务器错误", 
+      details: "处理请求时发生错误，请稍后重试", 
+      originalError: error.message 
+    }, { status: 500 });
   }
 }
 

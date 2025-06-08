@@ -21,7 +21,21 @@ export async function parseFeishuDoc(url: string): Promise<string> {
     
     if (!response.ok) {
       const errorData = await response.json()
-      throw new Error(errorData.error || '网络请求失败')
+      
+      // 处理详细的错误信息
+      let errorMessage = errorData.error || '网络请求失败'
+      
+      // 如果有详细错误信息，添加到错误消息中
+      if (errorData.details) {
+        errorMessage = `${errorMessage}: ${errorData.details}`
+      }
+      
+      // 权限错误特殊处理
+      if (errorData.error === '飞书API权限不足') {
+        errorMessage = '飞书API权限不足: 此功能需要在飞书开放平台为应用配置必要的API权限。请联系管理员解决。'
+      }
+      
+      throw new Error(errorMessage)
     }
     
     const data = await response.json()
@@ -36,7 +50,21 @@ export async function parseFeishuDoc(url: string): Promise<string> {
     
   } catch (error) {
     console.error('❌ 解析飞书文档失败:', error)
-    throw new Error(`解析失败: ${error instanceof Error ? error.message : '未知错误'}`)
+    
+    // 提供更友好的错误信息
+    const errorMessage = error instanceof Error ? error.message : '未知错误'
+    
+    // 返回HTML格式的错误信息，以便在UI中更好地显示
+    return `<div class="error-message" style="padding: 20px; background-color: #fff1f0; border-left: 4px solid #ff4d4f; margin: 20px 0;">
+      <h3 style="color: #cf1322; margin-top: 0;">飞书文档解析失败</h3>
+      <p>${errorMessage}</p>
+      <p>可能的解决方案:</p>
+      <ul>
+        <li>检查文档链接是否正确</li>
+        <li>确认文档访问权限设置</li>
+        <li>联系管理员配置飞书API权限</li>
+      </ul>
+    </div>`
   }
 }
 
