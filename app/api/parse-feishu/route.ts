@@ -2,6 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { kv } from "@vercel/kv";
 import { request as rawRequest } from "undici";
 import { unzipSync, strFromU8 } from 'fflate';
+import { downloadAndSaveImage, generateProxyImageUrl } from '../../utils/imageHandler';
+import fs from 'fs/promises';
+
+// 标记这个路由为动态，禁用静态生成
+export const dynamic = 'force-dynamic';
 
 // 飞书API配置
 const FEISHU_CONFIG = {
@@ -238,9 +243,17 @@ interface FeishuBlock {
     }>;
   };
   image?: {
-    token: string;
+    token?: string;
+    file_token?: string;
+    src?: string;
     width?: number;
     height?: number;
+  };
+  file?: {
+    token?: string;
+    file_token?: string;
+    name?: string;
+    size?: number;
   };
 }
 
@@ -384,44 +397,101 @@ async function batchGetTmpUrls(
   tokens: string[],
   accessToken: string,
 ): Promise<TmpDownloadUrl[]> {
-  const res = await fetch(
-    "https://open.feishu.cn/open-apis/drive/v1/medias/batch_get_tmp_download_url",
-    {
-      method: "POST",
-      headers: {
-        Authorization: accessToken,
-        "Content-Type": "application/json",
+  console.log(`🔗 开始批量获取临时URL，tokens: ${JSON.stringify(tokens)}`);
+  console.log(`🔑 使用访问令牌: ${accessToken.substring(0, 20)}...`);
+  
+  try {
+    const res = await fetch(
+      "https://open.feishu.cn/open-apis/drive/v1/medias/batch_get_tmp_download_url",
+      {
+        method: "POST",
+        headers: {
+          Authorization: accessToken,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ file_tokens: tokens }),
       },
-      body: JSON.stringify({ file_tokens: tokens }),
-    },
-  );
+    );
 
-  const json = await res.json();
-  console.log(`批量获取临时URL响应: ${JSON.stringify(json)}`);
+    console.log(`📊 API响应状态: ${res.status} ${res.statusText}`);
+    
+    // 先检查HTTP状态码
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.error(`❌ HTTP错误 ${res.status}: ${errorText}`);
+      throw new Error(`HTTP ${res.status}: ${res.statusText} - ${errorText}`);
+    }
+    
+    // 尝试解析JSON响应
+    let json;
+    try {
+      json = await res.json();
+    } catch (parseError) {
+      const responseText = await res.text();
+      console.error(`❌ JSON解析失败:`, parseError);
+      console.error(`❌ 响应内容:`, responseText);
+      throw new Error(`无法解析API响应: ${responseText.substring(0, 100)}...`);
+    }
+    
+    console.log(`📦 批量获取临时URL响应: ${JSON.stringify(json, null, 2)}`);
 
-  if (json.code !== 0) {
-    throw new Error(`飞书错误 ${json.code}: ${json.msg || "未知错误"}`);
+    if (json.code !== 0) {
+      console.error(`❌ 飞书API错误: ${json.code} - ${json.msg}`);
+      
+      // 如果是权限问题，提供更详细的错误信息
+      if (json.code === 11304 || json.msg?.includes('permission')) {
+        throw new Error(`飞书API权限不足: ${json.msg}。请确保应用已获得 'drive:drive:readonly' 权限`);
+      }
+      
+      throw new Error(`飞书错误 ${json.code}: ${json.msg || "未知错误"}`);
+    }
+
+    const tmpDownloadUrls = json.data?.tmp_download_urls || [];
+    console.log(`✅ 成功获取 ${tmpDownloadUrls.length} 个临时下载URL`);
+    
+    return tmpDownloadUrls;
+    
+  } catch (error) {
+    console.error(`❌ 批量获取临时URL失败:`, error);
+    throw error;
   }
-
-  return json.data.tmp_download_urls;
 }
 
-// 将图片URL转换为base64
+// 处理图片URL（已废弃，保留作为备用）
 async function downloadImageAsBase64(url: string): Promise<string | null> {
   try {
+    console.log(`📥 开始下载图片: ${url}`);
+    
     const response = await fetch(url); // 注意：下载时不要再添加Authorization头
 
+    console.log(`📊 图片下载响应状态: ${response.status} ${response.statusText}`);
+    console.log(`📊 图片响应头:`, Object.fromEntries(response.headers.entries()));
+
     if (!response.ok) {
-      console.error("下载图片失败:", response.status, response.statusText);
+      console.error("❌ 下载图片失败:", response.status, response.statusText);
       return null;
     }
 
     const buffer = await response.arrayBuffer();
     const contentType = response.headers.get("content-type") || "image/png";
+    const bufferSize = buffer.byteLength;
+    
+    console.log(`📊 图片信息: 类型=${contentType}, 大小=${bufferSize}字节`);
+    
+    if (bufferSize === 0) {
+      console.error("❌ 图片文件为空");
+      return null;
+    }
+    
     const base64 = Buffer.from(buffer).toString("base64");
+    const base64Length = base64.length;
+    
+    console.log(`✅ 图片转base64成功: ${base64Length}字符`);
+    
     return `data:${contentType};base64,${base64}`;
   } catch (error) {
-    console.error("下载图片时出错:", error);
+    console.error("❌ 下载图片时出错:", error);
+    console.error("❌ 错误详情:", error instanceof Error ? error.message : '未知错误');
     return null;
   }
 }
@@ -562,15 +632,292 @@ function processCalloutBlock(block: FeishuBlock): string {
   }
 }
 
-// 处理图片块
-function processImageBlock(block: FeishuBlock): string {
-  try {
-    // 简化处理，只返回图片占位符
-    return `<p>🖼️ [图片内容 - ID: ${block.block_id}]</p>\n`;
-  } catch (error) {
-    console.error("处理图片块时出错:", error);
-    return `<p>🖼️ [图片处理错误]</p>\n`;
+// 检查块是否包含图片内容
+function hasImageContent(block: FeishuBlock): boolean {
+  const blockAny = block as any;
+  
+  // 检查标准图片字段
+  if (block.image?.token || block.image?.file_token || 
+      block.file?.token || block.file?.file_token) {
+    return true;
   }
+  
+  // 检查各种可能的嵌套字段
+  const possibleFields = ['image', 'file', 'media', 'attachment', 'content', 'element'];
+  for (const field of possibleFields) {
+    if (blockAny[field] && typeof blockAny[field] === 'object') {
+      const fieldObj = blockAny[field];
+      const possibleTokenFields = ['token', 'file_token', 'image_token', 'media_token'];
+      
+      for (const tokenField of possibleTokenFields) {
+        if (fieldObj[tokenField] && typeof fieldObj[tokenField] === 'string') {
+          return true;
+        }
+      }
+    }
+  }
+  
+     // 检查图片URL（包括base64和HTTP URLs）
+   const possibleSrcFields = ['src', 'url', 'data', 'image_url', 'tmp_url'];
+   for (const field of possibleSrcFields) {
+     if (typeof blockAny[field] === 'string') {
+       const value = blockAny[field];
+       if (value.startsWith('data:image/') || value.startsWith('http')) {
+         return true;
+       }
+     }
+     
+     // 检查嵌套对象中的URL字段
+     if (blockAny.image && typeof blockAny.image[field] === 'string') {
+       const value = blockAny.image[field];
+       if (value.startsWith('data:image/') || value.startsWith('http')) {
+         return true;
+       }
+     }
+   }
+  
+  // 检查文件类型是否为图片
+  if (blockAny.file?.name && typeof blockAny.file.name === 'string') {
+    const fileName = blockAny.file.name.toLowerCase();
+    const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg'];
+    if (imageExtensions.some(ext => fileName.endsWith(ext))) {
+      return true;
+    }
+  }
+  
+  // 检查是否有图片相关的类型标识
+  if (blockAny.type && typeof blockAny.type === 'string') {
+    const type = blockAny.type.toLowerCase();
+    if (type.includes('image') || type.includes('picture') || type.includes('photo')) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// 处理图片块 - 新版本使用图片下载和代理机制
+async function processImageBlock(block: FeishuBlock, token: string, documentId?: string): Promise<string> {
+  try {
+    console.log(`🖼️ 图片块详细信息:`, JSON.stringify(block, null, 2));
+    
+    // 提取图片token或URL
+    let imageToken = null;
+    let directImageUrl = null;
+    const blockAny = block as any;
+    
+    // 优先检查标准字段
+    if (block.image?.token) {
+      imageToken = block.image.token;
+      console.log(`✅ 从 block.image.token 获取到图片token: ${imageToken}`);
+    } else if (block.image?.file_token) {
+      imageToken = block.image.file_token;
+      console.log(`✅ 从 block.image.file_token 获取到图片token: ${imageToken}`);
+    } else if (block.file?.token) {
+      imageToken = block.file.token;
+      console.log(`✅ 从 block.file.token 获取到图片token: ${imageToken}`);
+    } else if (block.file?.file_token) {
+      imageToken = block.file.file_token;
+      console.log(`✅ 从 block.file.file_token 获取到图片token: ${imageToken}`);
+    }
+    
+    // 检查是否是直接的图片URL（包括临时URL）
+    if (!imageToken) {
+      const possibleUrlFields = ['src', 'url', 'data', 'image_url', 'tmp_url'];
+      for (const field of possibleUrlFields) {
+        // 检查顶级字段
+        if (typeof blockAny[field] === 'string') {
+          const url = blockAny[field];
+          
+          if (url.startsWith('data:image/')) {
+            console.log(`✅ 发现base64图片数据在字段: ${field}`);
+            return generateImageHtml(url, block);
+          } else if (url.startsWith('http')) {
+            directImageUrl = url;
+            console.log(`✅ 发现图片URL在字段: ${field}, URL: ${url}`);
+            break;
+          }
+        }
+        
+        // 检查嵌套对象中的URL字段
+        if (blockAny.image && typeof blockAny.image[field] === 'string') {
+          const url = blockAny.image[field];
+          
+          if (url.startsWith('data:image/')) {
+            console.log(`✅ 发现base64图片数据在字段: image.${field}`);
+            return generateImageHtml(url, block);
+          } else if (url.startsWith('http')) {
+            directImageUrl = url;
+            console.log(`✅ 发现图片URL在字段: image.${field}, URL: ${url}`);
+            break;
+          }
+        }
+      }
+    }
+
+    // 如果找到了直接的图片URL，尝试下载并保存
+    if (directImageUrl) {
+      return await processDirectImageUrl(directImageUrl, block, token, documentId);
+    }
+
+    // 如果有imageToken但不是直接URL，需要获取临时下载URL
+    if (imageToken && !imageToken.startsWith('http')) {
+      return await processImageToken(imageToken, block, token, documentId);
+    }
+
+    // 如果imageToken已经是HTTP URL，直接处理
+    if (imageToken && imageToken.startsWith('http')) {
+      return await processDirectImageUrl(imageToken, block, token, documentId);
+    }
+
+    // 都没找到，返回错误提示
+    console.warn("❌ 图片块缺少token和直接URL:", block.block_id);
+    console.warn("❌ 完整块结构:", JSON.stringify(block, null, 2));
+    return `<div class="image-container" style="text-align: center; margin: 15px 0; padding: 20px; border: 2px dashed #ccc; border-radius: 8px;">
+      <p style="color: #999; font-style: italic;">🖼️ 图片内容缺失</p>
+      <p style="color: #666; font-size: 12px;">块类型: ${block.block_type}</p>
+    </div>\n`;
+    
+  } catch (error) {
+    console.error("❌ 处理图片块时出错:", error);
+    return `<div class="image-container" style="text-align: center; margin: 15px 0; padding: 20px; border: 2px dashed #f5f5f5; border-radius: 8px;">
+      <p style="color: #ff6b6b; font-style: italic;">🖼️ 图片处理错误</p>
+      <p style="color: #666; font-size: 12px;">${error instanceof Error ? error.message : '未知错误'}</p>
+    </div>\n`;
+  }
+}
+
+// 处理直接的图片URL
+async function processDirectImageUrl(imageUrl: string, block: FeishuBlock, token: string, documentId?: string): Promise<string> {
+  console.log(`📥 处理直接图片URL: ${imageUrl}`);
+  
+  // 尝试下载并保存图片到本地
+  const docId = documentId || 'unknown';
+  const localImageUrl = await downloadAndSaveImage(imageUrl, docId, token);
+  
+  if (localImageUrl) {
+    console.log(`✅ 图片已保存到本地: ${localImageUrl}`);
+    return generateImageHtml(localImageUrl, block);
+  } else {
+    console.log(`⚠️ 图片下载失败，使用代理URL: ${imageUrl}`);
+    // 下载失败，使用代理URL
+    const proxyUrl = generateProxyImageUrl(imageUrl, token);
+    return generateImageHtml(proxyUrl, block);
+  }
+}
+
+// 处理图片token，获取临时URL后下载
+async function processImageToken(imageToken: string, block: FeishuBlock, token: string, documentId?: string): Promise<string> {
+  console.log(`🔍 处理图片token: ${imageToken}`);
+  
+  // 方案1: 尝试直接使用单个媒体下载API
+  try {
+    console.log(`🔗 尝试直接媒体下载API: ${imageToken}`);
+    const mediaUrl = `https://open.feishu.cn/open-apis/drive/v1/medias/${imageToken}/download`;
+    
+    const response = await fetch(mediaUrl, {
+      method: 'GET',
+      headers: { 
+        'Authorization': token,
+        'Content-Type': 'application/json'
+      },
+    });
+    
+    console.log(`📊 媒体API响应状态: ${response.status} ${response.statusText}`);
+    
+    if (response.ok) {
+      // 检查是否是重定向到真实图片URL
+      const finalUrl = response.url;
+      
+      if (finalUrl !== mediaUrl) {
+        console.log(`✅ 媒体API重定向到: ${finalUrl}`);
+        return await processDirectImageUrl(finalUrl, block, token, documentId);
+      } else {
+        // 直接从响应获取图片数据
+        const contentType = response.headers.get('Content-Type');
+        if (contentType && contentType.startsWith('image/')) {
+          console.log(`✅ 媒体API直接返回图片数据: ${contentType}`);
+          const imageBuffer = await response.arrayBuffer();
+          
+          // 保存图片到本地
+          const docId = documentId || 'unknown';
+          const fileName = `${docId}_${imageToken}_${Date.now()}.jpg`;
+          const localPath = `./public/images/feishu/${fileName}`;
+          
+                     try {
+             await fs.writeFile(localPath, Buffer.from(imageBuffer));
+             const localUrl = `/images/feishu/${fileName}`;
+             console.log(`✅ 图片保存成功: ${localUrl}`);
+             return generateImageHtml(localUrl, block);
+           } catch (saveError) {
+            console.log(`⚠️ 保存失败，使用代理: ${saveError}`);
+            // 保存失败，使用代理URL  
+            const proxyUrl = generateProxyImageUrl(mediaUrl, token);
+            return generateImageHtml(proxyUrl, block);
+          }
+        }
+      }
+    } else {
+      console.log(`⚠️ 媒体API失败: ${response.status} ${response.statusText}`);
+    }
+  } catch (mediaError) {
+    console.log("⚠️ 直接媒体API失败:", mediaError);
+  }
+  
+  // 方案2: 尝试通过批量API获取临时下载URL (作为备用)
+  try {
+    console.log(`🔗 尝试批量API作为备用: ${imageToken}`);
+    const tmpUrls = await batchGetTmpUrls([imageToken], token);
+    
+    if (tmpUrls && tmpUrls.length > 0) {
+      const imageUrl = tmpUrls[0].tmp_download_url;
+      console.log(`📥 批量API获取到临时URL: ${imageUrl}`);
+      
+      // 处理临时URL
+      return await processDirectImageUrl(imageUrl, block, token, documentId);
+    }
+  } catch (apiError) {
+    console.log("⚠️ 批量API也失败了:", apiError);
+  }
+  
+  // 方案3: 如果都失败了，尝试构建图片代理URL
+  try {
+    console.log(`🔄 尝试生成代理URL: ${imageToken}`);
+    const directMediaUrl = `https://open.feishu.cn/open-apis/drive/v1/medias/${imageToken}/download`;
+    const proxyUrl = generateProxyImageUrl(directMediaUrl, token);
+    
+    console.log(`🔗 使用代理URL: ${proxyUrl}`);
+    return generateImageHtml(proxyUrl, block);
+    
+  } catch (proxyError) {
+    console.log("⚠️ 代理URL也失败了:", proxyError);
+  }
+  
+  // 所有方法都失败了
+  console.error("❌ 无法获取图片URL:", imageToken);
+  return `<div class="image-container" style="text-align: center; margin: 15px 0; padding: 20px; border: 2px dashed #ccc; border-radius: 8px;">
+    <p style="color: #999; font-style: italic;">🖼️ 图片无法加载</p>
+    <p style="color: #666; font-size: 12px;">Token: ${imageToken.substring(0, 20)}...</p>
+    <p style="color: #666; font-size: 11px;">请检查飞书应用权限配置</p>
+  </div>\n`;
+}
+
+// 生成图片HTML
+function generateImageHtml(imageSrc: string, block: FeishuBlock): string {
+  const width = block.image?.width ? Math.min(block.image.width, 800) : undefined;
+  const height = block.image?.height ? Math.min(block.image.height, 600) : undefined;
+  
+  const widthAttr = width ? `width="${width}"` : '';
+  const heightAttr = height ? `height="${height}"` : '';
+  
+  return `<div class="image-container" style="text-align: center; margin: 15px 0;">
+    <img src="${imageSrc}" 
+         alt="飞书文档图片" 
+         ${widthAttr} 
+         ${heightAttr}
+         style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);" 
+         loading="lazy" />
+  </div>\n`;
 }
 
 // 处理网格块
@@ -702,6 +1049,15 @@ async function parseDocxContent(
 
     // 处理每一个块
     for (const block of blockData.data?.items || []) {
+      console.log(`📦 处理块类型: ${block.block_type}, ID: ${block.block_id}`);
+      
+      // 对于可能的图片块，打印详细信息
+      if (block.block_type === 16 || block.block_type === 27 || 
+          block.block_type === 21 || block.block_type === 22 || 
+          block.block_type === 23 || hasImageContent(block)) {
+        console.log(`🔍 疑似图片块详细结构:`, JSON.stringify(block, null, 2));
+      }
+      
       // 处理文档内容
       switch (block.block_type) {
         case 2: // 文本
@@ -737,9 +1093,37 @@ async function parseDocxContent(
           stats.files++;
           break;
 
-        case 16: // 图片
-          content += processImageBlock(block);
+        case 16: // 旧版图片块类型
+          console.log(`🖼️ 发现图片块 (类型16):`, JSON.stringify(block, null, 2));
+          content += await processImageBlock(block, token, docId);
           stats.images++;
+          break;
+          
+        case 27: // 新版图片块类型（根据飞书API文档）
+          console.log(`🖼️ 发现图片块 (类型27):`, JSON.stringify(block, null, 2));
+          content += await processImageBlock(block, token, docId);
+          stats.images++;
+          break;
+          
+        case 21: // 可能是另一种图片块类型
+          console.log(`🖼️ 发现可能的图片块 (类型21):`, JSON.stringify(block, null, 2));
+          if (hasImageContent(block)) {
+            content += await processImageBlock(block, token, docId);
+            stats.images++;
+          } else {
+            content += `<p>[类型21块 - ID: ${block.block_id}]</p>\n`;
+          }
+          break;
+          
+        case 22: // 可能是其他媒体类型
+        case 23: // 文件类型，可能包含图片
+          console.log(`🖼️ 发现可能的媒体块 (类型${block.block_type}):`, JSON.stringify(block, null, 2));
+          if (hasImageContent(block)) {
+            content += await processImageBlock(block, token, docId);
+            stats.images++;
+          } else {
+            content += `<p>[类型${block.block_type}块 - ID: ${block.block_id}]</p>\n`;
+          }
           break;
 
         case 17: // 表格
@@ -763,7 +1147,16 @@ async function parseDocxContent(
           break;
 
         default:
-          content += `<p>[未知内容块 - 类型: ${block.block_type}]</p>\n`;
+          console.log(`⚠️ 未知块类型: ${block.block_type}`, JSON.stringify(block, null, 2));
+          
+          // 检查未知块类型是否包含图片信息
+          if (hasImageContent(block)) {
+            console.log(`🖼️ 在未知块类型${block.block_type}中发现图片内容，尝试处理`);
+            content += await processImageBlock(block, token, docId);
+            stats.images++;
+          } else {
+            content += `<p>[未知内容块 - 类型: ${block.block_type}]</p>\n`;
+          }
       }
     }
 
@@ -781,24 +1174,26 @@ async function createExportTask(
   tenantToken: string,
 ): Promise<string> {
   try {
-    console.log(`开始创建文档导出任务，文档token: ${fileToken}`);
+    console.log(`🚀 开始创建文档导出任务，文档token: ${fileToken}`);
     
-    console.log('file_token =', fileToken); // 调试日志，确认值不为空
+    console.log('📄 file_token =', fileToken); // 调试日志，确认值不为空
     
     if (!fileToken) throw new Error('file_token is empty');
     
-    const url = 'https://open.feishu.cn/open-apis/drive/v1/export_task/create';
+    // 更新为正确的API端点
+    const url = `${FEISHU_CONFIG.base_url}/drive/v1/export_tasks`;
     
     // 根据最新API要求，使用file_token参数
     const requestBody = {
       file_token: fileToken,
-      type: 'pdf'  // 如需 Word 可改 'docx'
+      type: 'docx'  // 改为docx格式，更通用
     };
     
-    console.log("请求URL:", url);
-    console.log("请求参数:", JSON.stringify(requestBody, null, 2));
-    console.log("Authorization:", `Bearer ${tenantToken.substring(0, 10)}...`);
+    console.log("📡 请求URL:", url);
+    console.log("📋 请求参数:", JSON.stringify(requestBody, null, 2));
+    console.log("🔑 Authorization:", `Bearer ${tenantToken.substring(0, 10)}...`);
     
+    console.log("⏳ 开始发送API请求...");
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -807,24 +1202,38 @@ async function createExportTask(
       },
       body: JSON.stringify(requestBody),
     });
+    console.log("📡 API请求已发送");
     
     // 获取完整响应内容便于调试
     const responseText = await response.text();
-    console.log("API响应状态:", response.status);
-    console.log("API响应头:", JSON.stringify(Object.fromEntries(response.headers.entries()), null, 2));
-    console.log("API响应内容:", responseText);
+    console.log("📊 API响应状态:", response.status);
+    console.log("📊 API响应状态文本:", response.statusText);
+    console.log("📊 API响应头:", JSON.stringify(Object.fromEntries(response.headers.entries()), null, 2));
+    console.log("📊 API响应内容:", responseText);
+    
+    // 处理非200状态码
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error(`API端点不存在: ${url}。可能需要检查API版本或权限配置。响应内容: ${responseText}`);
+      } else if (response.status === 403) {
+        throw new Error(`权限不足: 应用需要 'drive:drive:readonly' 权限来导出文档。请在飞书开放平台配置相应权限。响应内容: ${responseText}`);
+      } else if (response.status >= 400) {
+        throw new Error(`API调用失败: HTTP ${response.status} - ${responseText}`);
+      }
+    }
     
     let responseData;
     try {
       responseData = JSON.parse(responseText);
+      console.log("✅ 成功解析响应JSON");
     } catch (error) {
-      console.error("解析响应JSON失败:", error);
+      console.error("❌ 解析响应JSON失败:", error);
       throw new Error(`无法解析API响应: ${responseText.substring(0, 100)}...`);
     }
     
     // 检查API响应是否成功
     if (responseData.code !== 0) {
-      console.error("创建导出任务失败详情:", responseData);
+      console.error("❌ 创建导出任务失败详情:", responseData);
       
       // 识别权限错误并提供清晰提示
       if (responseData.code === 11304 || 
@@ -836,15 +1245,15 @@ async function createExportTask(
           ))) {
         throw new Error(`飞书API权限不足: ${responseData.msg || '权限错误'}。
 请确保您的应用已获得以下权限之一:
-- drive:export:readonly
-- docs:document:export
+- drive:drive:readonly
+- docs:document:readonly
 并确认应用已正确安装到企业中，且已获得文档访问权限。
 请在飞书开放平台-应用管理-权限管理中添加这些权限，然后重新发布应用版本并审批通过。`);
       }
       
       // 字段验证失败
       if (responseData.code === 99992402 || responseData.msg?.includes('field validation')) {
-        console.error("字段验证失败详情:", responseData.error?.field_violations);
+        console.error("❌ 字段验证失败详情:", responseData.error?.field_violations);
         
         // 尝试解析具体的字段错误
         let fieldErrors = "未知字段错误";
@@ -861,7 +1270,7 @@ async function createExportTask(
 3. 缺少必要的权限`);
       }
       
-      throw new Error(`创建导出任务失败: ${responseData.msg || '未知错误'}`);
+      throw new Error(`创建导出任务失败: ${responseData.msg || '未知错误'} (错误码: ${responseData.code})`);
     }
     
     // 成功情况下返回task_id
@@ -870,10 +1279,11 @@ async function createExportTask(
       throw new Error("API返回成功但没有返回task_id");
     }
     
-    console.log(`导出任务创建成功, taskId: ${taskId}`);
+    console.log(`✅ 导出任务创建成功, taskId: ${taskId}`);
     return taskId;
-  } catch (error) {
-    console.error("创建导出任务过程中发生异常:", error);
+  } catch (error: any) {
+    console.error("❌ 创建导出任务过程中发生异常:", error);
+    console.error("❌ 异常详情:", error.message);
     throw error;
   }
 }
@@ -883,11 +1293,16 @@ async function pollExportTask(
   taskId: string,
   tenantToken: string,
 ): Promise<string /*downloadUrl*/> {
-  const url = `https://open.feishu.cn/open-apis/drive/v1/export_task/get?task_id=${taskId}`;
+  const url = `${FEISHU_CONFIG.base_url}/drive/v1/export_tasks/${taskId}`;
   for (let i = 0; i < 20; i++) {          // 最多等 20×500ms = 10s
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${tenantToken}` },
     });
+    
+    if (!res.ok) {
+      throw new Error(`查询导出任务失败: HTTP ${res.status}`);
+    }
+    
     const j = await res.json();
     if (j.code !== 0) throw new Error(`查询导出任务失败: ${j.msg}`);
     const { status, result } = j.data;
@@ -947,7 +1362,7 @@ async function downloadDocxAndToMd(downloadUrl: string): Promise<string> {
   return md;
 }
 
-// 解析旧版docs格式文档 (使用export API)
+// 解析旧版docs格式文档 (优先使用直接API，导出API作为备选)
 async function parseDocsContent(
   docId: string,
   token: string,
@@ -958,6 +1373,17 @@ async function parseDocsContent(
     // 获取tenant token (Bearer格式)
     const tenantToken = token.startsWith('Bearer ') ? token.substring(7) : token;
     console.log("文档ID:", docId, "Token长度:", tenantToken.length);
+    
+    // 首先尝试使用docs API直接获取内容
+    try {
+      console.log("⏳ 尝试使用docs API直接获取内容...");
+      const directContent = await parseDocsDirectly(docId, token);
+      console.log("✅ 直接API方法成功，内容长度:", directContent.length);
+      return directContent;
+    } catch (directError: any) {
+      console.log("❌ 直接API方法失败:", directError.message);
+      console.log("⏳ 尝试使用导出API作为备选方案...");
+    }
     
     try {
       // 创建导出任务
@@ -977,24 +1403,103 @@ async function parseDocsContent(
       
       return markdown;
     } catch (error: any) {
-      console.error("解析旧版docs文档失败:", error);
+      console.error("导出API方式解析失败:", error);
       
       // 针对特定错误进行友好处理
       if (error.message && (
         error.message.includes("field validation failed") ||
-        error.message.includes("param error")
+        error.message.includes("param error") ||
+        error.message.includes("API端点不存在")
       )) {
-        throw new Error("API参数错误: 请联系管理员检查API参数格式");
+        throw new Error("API参数错误或端点不存在: 请联系管理员检查API版本和权限配置");
       }
       
       if (error.message && error.message.includes("no permission")) {
-        throw new Error("飞书API权限不足: 请确保应用已获得docs:document:export或drive:export:readonly权限，并正确安装到企业中");
+        throw new Error("飞书API权限不足: 请确保应用已获得必要权限，并正确安装到企业中");
       }
       
-      throw error;
+      // 如果导出API也失败，尝试返回基本信息
+      console.log("⚠️ 所有解析方法都失败，返回基本文档信息");
+      return `# 文档解析失败
+
+文档ID: ${docId}
+
+由于以下原因无法解析文档内容：
+${error.message}
+
+可能的解决方案：
+1. 检查文档权限设置
+2. 确认应用已获得必要权限
+3. 验证文档链接是否正确
+4. 联系管理员检查API配置
+
+请尝试重新分享文档或使用其他格式的文档。`;
     }
   } catch (error: any) {
     console.error("解析docs文档内容时出错:", error);
+    throw error;
+  }
+}
+
+// 直接使用docs API获取内容 (新增函数)
+async function parseDocsDirectly(
+  docId: string,
+  token: string,
+): Promise<string> {
+  try {
+    const headers = {
+      Authorization: token,
+      "Content-Type": "application/json; charset=utf-8",
+    };
+    
+    console.log("🔍 尝试直接调用docs API");
+    console.log("📄 文档ID:", docId);
+    console.log("🔑 Token长度:", token.length);
+    
+    // 尝试获取docs文档内容 - 使用旧版API
+    const apiUrl = `${FEISHU_CONFIG.base_url}/doc/v2/docs/${docId}/content`;
+    console.log("📡 API URL:", apiUrl);
+    
+    const docResponse = await fetch(apiUrl, { headers });
+    
+    console.log("📊 API响应状态:", docResponse.status);
+    console.log("📊 API响应状态文本:", docResponse.statusText);
+    
+    if (!docResponse.ok) {
+      const errorText = await docResponse.text();
+      console.error("❌ API响应错误内容:", errorText);
+      throw new Error(`获取docs内容失败: HTTP ${docResponse.status} - ${errorText}`);
+    }
+    
+    const docData = await docResponse.json();
+    console.log("📄 API响应数据:", JSON.stringify(docData, null, 2));
+    
+    if (docData.code !== 0) {
+      throw new Error(`获取docs内容失败: ${docData.msg} (错误码: ${docData.code})`);
+    }
+    
+    console.log("📄 成功获取docs内容");
+    
+    // 处理docs格式的内容
+    let content = `# ${docData.data?.title || '未命名文档'}\n\n`;
+    
+    // 简单处理docs内容
+    if (docData.data?.content) {
+      // 如果有结构化内容，尝试解析
+      const docContent = docData.data.content;
+      if (typeof docContent === 'string') {
+        content += docContent;
+      } else if (typeof docContent === 'object') {
+        content += JSON.stringify(docContent, null, 2);
+      }
+    } else {
+      content += "文档内容为空或无法解析。";
+    }
+    
+    return content;
+  } catch (error: any) {
+    console.error("❌ 直接解析docs失败:", error);
+    console.error("❌ 错误详情:", error.message);
     throw error;
   }
 }
@@ -1033,8 +1538,17 @@ export async function POST(req: NextRequest) {
     
     console.log("🔗 收到请求链接:", url);
     
+    // 验证URL格式
+    let urlObj;
+    try {
+      urlObj = new URL(url);
+    } catch (urlError) {
+      console.error("❌ 无效的URL格式:", url);
+      return Response.json({ error: "URL格式错误", details: "请提供有效的飞书文档链接" }, { status: 400 });
+    }
+    
     // 解析飞书链接
-    const docPath = new URL(url).pathname;
+    const docPath = urlObj.pathname;
     console.log("📄 提取的文档路径:", docPath);
     
     const linkInfo = parseFeishuLink(url);

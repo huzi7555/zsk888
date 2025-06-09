@@ -28,6 +28,10 @@ pnpm-debug.log*
 
 # local env files
 .env*.local
+
+# Downloaded images
+public/images/feishu/*
+!public/images/feishu/.gitkeep
 .env
 
 # vercel

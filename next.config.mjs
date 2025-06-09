@@ -1,8 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // 配置服务器绑定到所有网络接口
+  // Next.js 14已经默认启用React Server Components，无需配置
   experimental: {
-    serverComponents: true,
+    // serverComponents 配置项已被移除
   },
   // 允许跨域
   async headers() {
