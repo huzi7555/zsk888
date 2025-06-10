@@ -1,9 +1,10 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { 
   FileText, 
   Image, 
@@ -15,7 +16,12 @@ import {
   ChevronDown,
   ChevronRight,
   Eye,
-  Copy
+  Copy,
+  Tag,
+  Plus,
+  X,
+  Sparkles,
+  Loader2
 } from "lucide-react"
 
 interface ParsedContent {
@@ -33,11 +39,127 @@ interface ParsePreviewProps {
   content?: ParsedContent
   isLoading?: boolean
   error?: string
+  onTagsChange?: (manualTags: string[], autoTags: string[]) => void
+  initialManualTags?: string[]
+  initialAutoTags?: string[]
 }
 
-export function ParsePreview({ content, isLoading, error }: ParsePreviewProps) {
-  const [activeTab, setActiveTab] = useState<'content' | 'media' | 'links' | 'docs'>('content')
+interface TagChipProps {
+  label: string
+  variant?: 'manual' | 'auto'
+  removable?: boolean
+  onRemove?: () => void
+  onClick?: () => void
+}
+
+function TagChip({ label, variant = 'manual', removable = false, onRemove, onClick }: TagChipProps) {
+  const baseClasses = "inline-flex items-center gap-1 px-2 py-1 text-xs rounded-full transition-colors"
+  const manualClasses = "bg-blue-100 text-blue-800 hover:bg-blue-200"
+  const autoClasses = "bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+  
+  return (
+    <span 
+      className={`${baseClasses} ${variant === 'manual' ? manualClasses : autoClasses} ${onClick ? 'cursor-pointer' : ''}`}
+      onClick={onClick}
+    >
+      {variant === 'auto' && <Sparkles className="h-3 w-3" />}
+      {label}
+      {removable && onRemove && (
+        <X 
+          className="h-3 w-3 cursor-pointer hover:text-red-600" 
+          onClick={(e) => {
+            e.stopPropagation()
+            onRemove()
+          }}
+        />
+      )}
+    </span>
+  )
+}
+
+export function ParsePreview({ 
+  content, 
+  isLoading, 
+  error, 
+  onTagsChange,
+  initialManualTags = [],
+  initialAutoTags = []
+}: ParsePreviewProps) {
+  const [activeTab, setActiveTab] = useState<'content' | 'media' | 'links' | 'docs' | 'tags'>('content')
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({})
+  const [manualTags, setManualTags] = useState<string[]>(initialManualTags)
+  const [autoTags, setAutoTags] = useState<string[]>(initialAutoTags)
+  const [newTagInput, setNewTagInput] = useState('')
+  const [isGeneratingTags, setIsGeneratingTags] = useState(false)
+
+  // 当父组件传入标签时，更新本地状态
+  useEffect(() => {
+    setManualTags(initialManualTags)
+  }, [initialManualTags])
+
+  useEffect(() => {
+    setAutoTags(initialAutoTags)
+  }, [initialAutoTags])
+
+  // 自动生成AI标签
+  useEffect(() => {
+    if (content && content.content && autoTags.length === 0) {
+      generateAutoTags()
+    }
+  }, [content])
+
+  const generateAutoTags = async () => {
+    if (!content) return
+    
+    setIsGeneratingTags(true)
+    try {
+      const response = await fetch('/api/extract-tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: content.content,
+          title: content.title
+        })
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        setAutoTags(data.autoTags || [])
+        onTagsChange?.(manualTags, data.autoTags || [])
+      }
+    } catch (error) {
+      console.error('AI标签生成失败:', error)
+    } finally {
+      setIsGeneratingTags(false)
+    }
+  }
+
+  const addManualTag = () => {
+    if (newTagInput.trim() && !manualTags.includes(newTagInput.trim())) {
+      const newTags = [...manualTags, newTagInput.trim()]
+      setManualTags(newTags)
+      setNewTagInput('')
+      onTagsChange?.(newTags, autoTags)
+    }
+  }
+
+  const removeManualTag = (tag: string) => {
+    const newTags = manualTags.filter(t => t !== tag)
+    setManualTags(newTags)
+    onTagsChange?.(newTags, autoTags)
+  }
+
+  const removeAutoTag = (tag: string) => {
+    const newTags = autoTags.filter(t => t !== tag)
+    setAutoTags(newTags)
+    onTagsChange?.(manualTags, newTags)
+  }
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      addManualTag()
+    }
+  }
 
   const toggleSection = (section: string) => {
     setExpandedSections(prev => ({
@@ -87,6 +209,7 @@ export function ParsePreview({ content, isLoading, error }: ParsePreviewProps) {
 
   const tabs = [
     { id: 'content', label: '内容', icon: FileText, count: null },
+    { id: 'tags', label: '标签', icon: Tag, count: manualTags.length + autoTags.length },
     { id: 'media', label: '媒体', icon: Image, count: content.images.length + content.videos.length },
     { id: 'links', label: '链接', icon: ExternalLink, count: content.externalLinks.length },
     { id: 'docs', label: '内嵌文档', icon: FileText, count: content.embeddedDocs.length }
@@ -168,6 +291,78 @@ export function ParsePreview({ content, isLoading, error }: ParsePreviewProps) {
             </div>
           )}
 
+          {activeTab === 'tags' && (
+            <div className="space-y-6">
+              {/* 手动标签管理 */}
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <Tag className="h-4 w-4 text-blue-600" />
+                  <span className="font-medium">手动标签</span>
+                </div>
+                
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {manualTags.map(tag => (
+                    <TagChip
+                      key={tag}
+                      label={tag}
+                      variant="manual"
+                      removable
+                      onRemove={() => removeManualTag(tag)}
+                    />
+                  ))}
+                </div>
+                
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="添加标签..."
+                    value={newTagInput}
+                    onChange={(e) => setNewTagInput(e.target.value)}
+                    onKeyPress={handleKeyPress}
+                    className="flex-1"
+                  />
+                  <Button onClick={addManualTag} size="sm">
+                    <Plus className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+
+              {/* AI自动标签 */}
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <Sparkles className="h-4 w-4 text-emerald-600" />
+                  <span className="font-medium">AI 智能标签</span>
+                  {isGeneratingTags && (
+                    <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />
+                  )}
+                </div>
+                
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {autoTags.map(tag => (
+                    <TagChip
+                      key={tag}
+                      label={tag}
+                      variant="auto"
+                      removable
+                      onRemove={() => removeAutoTag(tag)}
+                    />
+                  ))}
+                </div>
+                
+                {autoTags.length === 0 && !isGeneratingTags && (
+                  <Button 
+                    onClick={generateAutoTags} 
+                    variant="outline" 
+                    size="sm"
+                    className="text-emerald-600 border-emerald-600 hover:bg-emerald-50"
+                  >
+                    <Sparkles className="h-4 w-4 mr-2" />
+                    生成智能标签
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === 'media' && (
             <div className="space-y-6">
               {/* 图片部分 */}
@@ -223,17 +418,26 @@ export function ParsePreview({ content, isLoading, error }: ParsePreviewProps) {
                   </div>
                   
                   {expandedSections.videos && (
-                    <div className="space-y-2 ml-6">
+                    <div className="space-y-3 ml-6">
                       {content.videos.map((video, idx) => (
-                        <div key={idx} className="flex items-center justify-between p-3 border rounded-lg">
+                        <div key={idx} className="border rounded-lg p-3">
                           <div className="flex items-center gap-3">
-                            <Video className="h-5 w-5 text-gray-400" />
-                            <span className="text-sm">{video.title}</span>
+                            <Video className="h-8 w-8 text-gray-400" />
+                            <div className="flex-1">
+                              <p className="font-medium text-sm">{video.title}</p>
+                              <p className="text-xs text-gray-500">视频文件</p>
+                            </div>
+                            <div className="flex gap-2">
+                              <Button variant="outline" size="sm">
+                                <Eye className="h-4 w-4 mr-1" />
+                                预览
+                              </Button>
+                              <Button variant="outline" size="sm">
+                                <Download className="h-4 w-4 mr-1" />
+                                下载
+                              </Button>
+                            </div>
                           </div>
-                          <Button size="sm" variant="outline">
-                            <Eye className="h-4 w-4 mr-1" />
-                            播放
-                          </Button>
                         </div>
                       ))}
                     </div>
@@ -246,68 +450,76 @@ export function ParsePreview({ content, isLoading, error }: ParsePreviewProps) {
           {activeTab === 'links' && (
             <div className="space-y-3">
               {content.externalLinks.map((link, idx) => (
-                <div key={idx} className="border rounded-lg p-4 hover:bg-gray-50 transition-colors">
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <h4 className="font-medium text-gray-900 hover:text-blue-600">
-                        <a href={link.url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2">
-                          {link.title}
-                          <ExternalLink className="h-3 w-3" />
-                        </a>
-                      </h4>
-                      {link.description && (
-                        <p className="text-sm text-gray-600 mt-1">{link.description}</p>
-                      )}
-                      <p className="text-xs text-gray-400 mt-2">{link.url}</p>
-                    </div>
+                <div key={idx} className="border rounded-lg p-3 hover:bg-gray-50">
+                  <div className="flex items-start gap-3">
                     {link.image && (
                       <img 
                         src={link.image} 
-                        alt={link.title}
-                        className="w-16 h-16 object-cover rounded ml-4"
+                        alt=""
+                        className="w-16 h-16 rounded object-cover flex-shrink-0"
                       />
                     )}
+                    <div className="flex-1 min-w-0">
+                      <h4 className="font-medium text-sm mb-1 truncate">{link.title}</h4>
+                      <p className="text-xs text-gray-600 mb-2 line-clamp-2">{link.description}</p>
+                      <a 
+                        href={link.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="text-xs text-blue-600 hover:underline truncate block"
+                      >
+                        {link.url}
+                      </a>
+                    </div>
+                    <ExternalLink className="h-4 w-4 text-gray-400 flex-shrink-0 mt-1" />
                   </div>
                 </div>
               ))}
+              
+              {content.externalLinks.length === 0 && (
+                <div className="text-center py-8 text-gray-500">
+                  <Link className="mx-auto h-12 w-12 mb-2" />
+                  <p>暂无外部链接</p>
+                </div>
+              )}
             </div>
           )}
 
           {activeTab === 'docs' && (
-            <div className="space-y-4">
+            <div className="space-y-3">
               {content.embeddedDocs.map((doc, idx) => (
-                <div key={idx} className="border rounded-lg">
-                  <div 
-                    className="flex items-center justify-between p-4 cursor-pointer"
-                    onClick={() => toggleSection(`doc-${idx}`)}
-                  >
-                    <div className="flex items-center gap-3">
-                      {expandedSections[`doc-${idx}`] ? 
-                        <ChevronDown className="h-4 w-4" /> : 
-                        <ChevronRight className="h-4 w-4" />
-                      }
-                      <FileText className="h-5 w-5 text-blue-600" />
-                      <div>
-                        <h4 className="font-medium">{doc.title}</h4>
-                        <p className="text-xs text-gray-500">{doc.url}</p>
-                      </div>
+                <div key={idx} className="border rounded-lg p-3">
+                  <div className="flex items-center gap-3">
+                    <FileText className="h-8 w-8 text-blue-500" />
+                    <div className="flex-1">
+                      <h4 className="font-medium text-sm mb-1">{doc.title}</h4>
+                      <a 
+                        href={doc.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer"
+                        className="text-xs text-blue-600 hover:underline"
+                      >
+                        查看原文档
+                      </a>
                     </div>
-                    <Button size="sm" variant="outline">
-                      <ExternalLink className="h-4 w-4 mr-1" />
-                      打开
-                    </Button>
                   </div>
-                  
-                  {expandedSections[`doc-${idx}`] && doc.content && (
-                    <div className="px-4 pb-4 border-t bg-gray-50">
+                  {doc.content && (
+                    <div className="mt-3 pt-3 border-t">
                       <div 
-                        className="text-sm text-gray-700 mt-3"
+                        className="text-xs text-gray-600 prose max-w-none"
                         dangerouslySetInnerHTML={{ __html: doc.content }}
                       />
                     </div>
                   )}
                 </div>
               ))}
+              
+              {content.embeddedDocs.length === 0 && (
+                <div className="text-center py-8 text-gray-500">
+                  <FileText className="mx-auto h-12 w-12 mb-2" />
+                  <p>暂无内嵌文档</p>
+                </div>
+              )}
             </div>
           )}
         </div>

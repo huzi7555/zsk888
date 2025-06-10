@@ -1093,15 +1093,15 @@ async function parseDocxContent(
           stats.files++;
           break;
 
-        case 16: // 旧版图片块类型
-          console.log(`🖼️ 发现图片块 (类型16):`, JSON.stringify(block, null, 2));
-          content += await processImageBlock(block, token, docId);
+        case 16: // 旧版图片块类型 - 跳过处理
+          console.log(`🖼️ 跳过图片块处理 (类型16):`, block.block_id);
+          content += `<p style="color: #666; font-style: italic;">[图片内容已跳过]</p>\n`;
           stats.images++;
           break;
           
-        case 27: // 新版图片块类型（根据飞书API文档）
-          console.log(`🖼️ 发现图片块 (类型27):`, JSON.stringify(block, null, 2));
-          content += await processImageBlock(block, token, docId);
+        case 27: // 新版图片块类型 - 跳过处理
+          console.log(`🖼️ 跳过图片块处理 (类型27):`, block.block_id);
+          content += `<p style="color: #666; font-style: italic;">[图片内容已跳过]</p>\n`;
           stats.images++;
           break;
           

@@ -10,10 +10,10 @@ export default function UploadPage() {
   const formRef = useRef<UploadFormContentRef>(null) // Create a ref for UploadFormContent
   const addUploadedContent = useStore((s) => s.addUploadedContent) // Get addUploadedContent from store
 
-  const handleConfirmUploadPage = () => {
-    formRef.current?.submit() // Call the submit method on the ref
+  const handleConfirmUploadPage = async () => {
+    await formRef.current?.submit() // Call the submit method on the ref
     // The submit method in UploadFormContent already adds to the store and resets its internal state.
-    // So, we just need to navigate here.
+    // Now we can safely navigate
     router.push("/inbox")
   }
 

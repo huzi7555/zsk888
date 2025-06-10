@@ -1,6 +1,7 @@
 "use client"
+import { useEffect } from "react"
 import { InboxToolbar } from "@/app/components/InboxToolbar"
-import { ClipCard } from "@/app/components/ClipCard"
+import { DocumentCard } from "@/app/components/DocumentCard"
 import { GroupHeader } from "@/app/components/GroupHeader"
 // import { SimplifiedNewButton } from "@/app/components/SimplifiedNewButton" // Removed
 import { useStore } from "@/app/store"
@@ -14,10 +15,19 @@ function groupByDate(clips: Clip[]) {
 }
 
 export default function InboxPage() {
-  const { filteredClips, tags, setFilteredClips } = useStore()
+  const { filteredClips, tags, setFilteredClips, init } = useStore()
   const grouped = groupByDate(filteredClips)
-  const pendingCount = filteredClips.length
-  const archivedCount = 12 // 假数据
+
+  // 初始化localStorage数据
+  useEffect(() => {
+    init()
+  }, [])
+  
+  // 按状态统计
+  const pendingCount = filteredClips.filter(c => c.status === 'pending').length
+  const analyzingCount = filteredClips.filter(c => c.status === 'analyzing').length
+  const completedCount = filteredClips.filter(c => c.status === 'completed').length
+  const archivedCount = filteredClips.filter(c => c.status === 'archived').length
 
   return (
     <div className="py-8 px-4 min-h-screen">
@@ -33,15 +43,29 @@ export default function InboxPage() {
           <div className="flex flex-wrap items-center justify-between px-10 pt-4 pr-20">
             <div>
               <h1 className="flex items-center text-xl font-semibold text-gray-900 dark:text-gray-100">
-                📥 收件箱
-                <span className="inline-flex items-center ml-4 px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">
-                  Pending&nbsp;{pendingCount}
+                📥 智能知识收件箱
+                <span className="inline-flex items-center ml-4 px-2 py-0.5 text-xs rounded-full bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-300">
+                  待处理&nbsp;{pendingCount}
                 </span>
-                <span className="inline-flex items-center ml-2 px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">
-                  已归档&nbsp;{archivedCount}
+                {analyzingCount > 0 && (
+                  <span className="inline-flex items-center ml-2 px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300">
+                    分析中&nbsp;{analyzingCount}
+                  </span>
+                )}
+                <span className="inline-flex items-center ml-2 px-2 py-0.5 text-xs rounded-full bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300">
+                  已完成&nbsp;{completedCount}
                 </span>
+                {archivedCount > 0 && (
+                  <span className="inline-flex items-center ml-2 px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">
+                    已归档&nbsp;{archivedCount}
+                  </span>
+                )}
               </h1>
-              <p className="text-sm text-gray-500 mt-1 dark:text-gray-400">管理和整理您收集的知识片段</p>
+              <p className="text-sm text-gray-500 mt-1 dark:text-gray-400">
+                智能管理和分析您的知识文档 • 
+                支持飞书/腾讯文档解析 • 
+                AI自动标签提取和内容分析
+              </p>
             </div>
           </div>
 
@@ -60,11 +84,17 @@ export default function InboxPage() {
             Object.entries(grouped)
               .sort(([a], [b]) => b.localeCompare(a)) // 按日期倒序排列
               .map(([date, clips]) => (
-                <div key={date}>
+                <div key={date} className="mb-8">
                   <GroupHeader date={date} />
-                  <div className="space-y-6">
-                    {clips.map((c) => (
-                      <ClipCard key={c.id} clip={c} />
+                  <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                    {clips.map((clip) => (
+                      <DocumentCard 
+                        key={clip.id} 
+                        clip={clip}
+                        onClick={() => {
+                          window.location.href = `/clip/${clip.id}`
+                        }}
+                      />
                     ))}
                   </div>
                 </div>
@@ -72,7 +102,9 @@ export default function InboxPage() {
           ) : (
             <div className="flex flex-col items-center pt-24 text-gray-400 dark:text-gray-500">
               <span className="text-6xl mb-4">🔍</span>
-              <p className="text-sm">没有找到匹配的条目，尝试其他搜索词或标签</p>
+              <p className="text-lg font-medium mb-2">暂无文档</p>
+              <p className="text-sm">没有找到匹配的文档，尝试其他搜索词或标签</p>
+              <p className="text-sm mt-1">您也可以上传新的飞书文档来开始使用</p>
             </div>
           )}
         </div>

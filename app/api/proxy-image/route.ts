@@ -32,6 +32,28 @@ export async function GET(request: NextRequest) {
 
     if (!response.ok) {
       console.error(`❌ 图片代理失败: ${response.status} ${response.statusText}`);
+      
+      // 对于403错误，返回一个占位图片而不是错误
+      if (response.status === 403) {
+        // 创建一个简单的占位图片SVG
+        const placeholderSvg = `
+          <svg width="300" height="200" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100%" height="100%" fill="#f3f4f6"/>
+            <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="14">
+              图片无法加载
+            </text>
+          </svg>
+        `;
+        
+        return new NextResponse(placeholderSvg, {
+          headers: {
+            'Content-Type': 'image/svg+xml',
+            'Cache-Control': 'public, max-age=3600',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+      }
+      
       return new NextResponse('图片加载失败', { status: response.status });
     }
 

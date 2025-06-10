@@ -22,7 +22,7 @@ import {
 
 // Define the interface for the ref object
 export interface UploadFormContentRef {
-  submit: () => void
+  submit: () => Promise<void>
 }
 
 interface UploadFormContentProps {
@@ -77,18 +77,15 @@ const UploadFormContent = forwardRef<UploadFormContentRef, UploadFormContentProp
     }
 
     // This function will be exposed via ref
-    const handleFinalUpload = () => {
-      const finalTags = Array.from(new Set([...tags, ...autoTags]))
-
-      addUploadedContent({
+    const handleFinalUpload = async () => {
+      await addUploadedContent({
         title: title || "未命名条目",
-        tags: finalTags,
-        paragraphs: [],
-        images: [],
-        videos: [],
-        links: [],
+        tags: tags, // 手动标签
+        autoTags: autoTags, // AI标签
         content: html,
         summary: summary,
+        sourceType: selectedSourceType as 'feishu' | 'tencent' | 'manual',
+        originalUrl: selectedSourceType === 'feishu' || selectedSourceType === 'tencent' ? feishuTencentLink : undefined
       })
       // Reset form fields after successful upload
       setTitle("")
