@@ -4,7 +4,6 @@ import { LayoutPanelLeft } from "lucide-react"
 import SideBar from "@/app/components/SideBar"
 import { SiteFooter } from "@/app/components/SiteFooter"
 import AppHeader from "@/app/components/AppHeader"
-
 export default function LayoutShell({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(false)
 
@@ -36,6 +35,8 @@ export default function LayoutShell({ children }: { children: ReactNode }) {
         <main className="flex-1">{children}</main>
         <SiteFooter />
       </div>
+
+
     </>
   )
 }
